@@ -1,0 +1,197 @@
+---
+layout: post
+title:  "Tween"
+date:   2014-05-14 11:57:07 +0200
+categories: hands on coding
+---
+I entered iOS development with prior experience in Adobe Flash and its proprietary language, ActionScript. The equivalent of UIView in Flash was the Movie Clip. You could animate a Movie Clip directly in the visual editor, as Flash was originally designed for that purpose, with scripting added later. Flash allowed for both frame-by-frame animation of transformations and tweening, where you only needed to set the position of a graphic element in keyframes, and the intermediate states were calculated programmatically. This approach was implemented in code through the Tween class.
+
+```c
+var myObject:MovieClip = new MovieClip();
+addChild(myObject);
+var moveTween:Tween = new Tween(myObject, "x", Strong.easeInOut, myObject.x, 300, 2, true);
+```
+Type checking left much to be desired, but the unique feature of the Tween class was its ability to animate both the display attributes of an object—such as position, rotation, and scale—and any other properties that seemed non-animatable at first glance. And when I once needed to create a counter-style animation effect, I decided to bring this handy tool back into my arsenal.
+
+The task can be formulated as follows: change an object’s property over time from an initial value to a final one, not linearly but according to a specified timing function. And, of course, the intermediate states of the animation should be visible on the screen.
+
+To achieve this behavior, we’ll go a level deeper than UIKit and work with QuartzCore. Following the design of the original Tween, we’ll declare a new class with parameters for the upcoming animation:
+
+```swift
+final class Tween {
+
+  private weak var object: UIView?
+
+  private let key: String?
+
+  init(object: UIView, key: String? = nil, from: CGFloat, to: CGFloat, duration: TimeInterval) {
+    self.object = object
+    self.key = key
+  }
+  
+}
+```
+
+All the essential work will be handled by a subclass of CALayer, which we will add to the animating object and remove at the end of the animation. Import QuartzCore and declare a new class, equipping it with all the necessary parameters for the animation:
+
+```swift
+import QuartzCore
+
+final class TweenLayer: CALayer {
+  var from: CGFloat = 0.0
+  var to: CGFloat = 0.0
+  var tweenDuration: TimeInterval = 0.0
+  var timingFunction = CAMediaTimingFunction(name: .linear)
+  var delay: TimeInterval = 0.0
+}
+```
+
+Next, we will add the `animatableProperty` to the layer. It is this property whose value will change over time.
+```swift
+@NSManaged fileprivate var animatableProperty: CGFloat
+```
+
+`@NSManaged` is used here to allow CALayer to dynamically manage and animate the animatableProperty during runtime, leveraging Objective-C’s runtime capabilities for seamless property animation.
+
+Next, we’ll override the action(forKey:) method so that changes to the value for our key are accompanied by an animation:
+
+```swift
+override func action(forKey event: String) -> CAAction? {
+  guard ["animatableProperty", "onOrderIn"].contains(event) else {
+    return super.action(forKey: event)
+  }
+  
+  let animation = CABasicAnimation(keyPath: event)
+  animation.timingFunction = timingFunction
+  animation.fromValue = from
+  animation.toValue = to
+  animation.duration = tweenDuration
+  animation.beginTime = CACurrentMediaTime() + delay
+  animation.delegate = self as? CAAnimationDelegate
+  
+  return animation
+}
+```
+
+The following code informs the framework that changes to the property should be displayed:
+```swift
+override class func needsDisplay(forKey event: String) -> Bool {
+  return event == "animatableProperty" ? true : super.needsDisplay(forKey: event)
+}
+```
+
+The command to start the animation for the layer will be changing the value of `animatableProperty`. Add this method to `TweenLayer`:
+```swift
+func startAnimation() {
+  animatableProperty = to + 0.00001
+}
+```
+The 0.00001 is added to ensure the animation triggers even when the current and target values are nearly identical.
+
+To allow `Tween` to be notified of changes to the animated property and update the controlled view accordingly, we will use delegation. Declare the protocol as follows:
+```swift
+protocol TweenLayerDelegate: AnyObject {
+  func tweenLayer(_ layer: TweenLayer, didSetAnimatableProperty to: CGFloat)
+  func tweenLayerDidStopAnimation(_ layer: TweenLayer)
+}
+```
+
+Next, in the layer subclass, add the `tweenDelegate` property and override the `display()` method to notify the delegate of changes.
+```swift
+var tweenDelegate: TweenLayerDelegate?
+
+override func display() {
+  if let value = presentation()?.animatableProperty {
+    tweenDelegate?.tweenLayer(self, didSetAnimatableProperty: value)
+    if value == to {
+      tweenDelegate?.tweenLayerDidStopAnimation(self)
+      tweenDelegate = nil
+    }
+  }
+}
+```
+
+Let's return to the `Tween` class and declare the `tweenLayer` property in it:
+```swift
+private weak var layer: TweenLayer!
+```
+We will configure the `layer` property in the initializer of the `Tween` class:
+```swift
+layer = {
+  let layer = TweenLayer()
+  layer.from = from
+  layer.to = to
+  layer.tweenDuration = duration
+  layer.tweenDelegate = self
+  object.layer.addSublayer(layer)
+  
+  return layer
+}()
+```
+The animatable property is of type `CGFloat`. To allow `Tween` to animate properties of arbitrary types, we will add a mapper property:
+```swift
+var mapper: ((CGFloat) -> AnyObject)?
+```
+
+Let's also update the `timingFunction` property to pass the new value directly to the layer:
+```swift
+var timingFunction: CAMediaTimingFunction {
+  set { layer.timingFunction = newValue }
+  get { return layer.timingFunction }
+}
+```
+
+Now, by implementing the delegate methods, we’ll translate changes to the animated property of the layer into updates to the animating view’s property. After the animation completes, the layer is removed, which triggers the deallocation of both the layer and the Tween object.
+```swift
+extension Tween: TweenLayerDelegate {
+  
+  func tweenLayer(_ layer: TweenLayer, didSetAnimatableProperty newValue: CGFloat) {
+    didUpdateValue?(newValue)
+    guard let key = key else { return }
+    if let mapper = mapper {
+      object?.setValue(mapper(newValue), forKey: key)
+    } else {
+      object?.setValue(newValue, forKey: key)
+    }
+  }
+  
+  func tweenLayerDidStopAnimation(_ layer: TweenLayer) {
+    completion?()
+    layer.removeFromSuperlayer()
+    self.layer = nil
+  }
+  
+}
+```
+The final touch is the method to start the animation. Add the following code to the `Tween` class:
+```swift
+func start() {
+  layer.startAnimation()
+}
+```
+
+Let's now test the animation by animating, for example, the price change on the screen:
+```swift
+let formatter = NumberFormatter()
+formatter.numberStyle = .currency
+formatter.currencySymbol = "$"
+
+let tween = Tween(object: label, key: "text", from: 0, to: 100, duration: 2.0)
+tween.timingFunction = .init(name: .easeOut)
+tween.mapper = {
+  formatter.string(from: $0 as NSNumber) as AnyObject
+}
+
+tween.start()
+```
+
+And here's the result: the price is smoothly updated on the screen from $0.00 to $100.00 over 2 seconds, with the final price displayed after the animation completes.
+
+<img src="/assets/0001_tween/label_countdown.mov" alt="00.00 $" width="250"/>
+
+#### Resources:
+
+<a href="/assets/0001_tween/Tween.swift" download>Tween.swift</a>
+
+<a href="https://developer.apple.com/documentation/quartzcore/calayer">CALayer | Apple Developer Documentation</a>
+
